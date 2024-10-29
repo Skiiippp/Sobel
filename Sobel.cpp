@@ -10,8 +10,6 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
 
-//const std::string in_vid_filename = "../Megamind.avi";
-
 const int x_kern[3][3] = 
 {
     {-1, 0, 1},
