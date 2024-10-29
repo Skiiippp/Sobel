@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include <pthread.h>
+#include <semaphore.h>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
@@ -40,10 +41,14 @@ struct ThreadArgument
     cv::Mat *sobel_frame_ptr;
     int bottom_row_index;
     size_t rows_to_read;
+    bool last;
 };
 
 /* Barriers  */
 pthread_barrier_t barrier;
+
+/* Printing semaphore */
+sem_t print_sem;
 
 /* Threads */
 static pthread_t threads[NUM_THREADS];
@@ -92,6 +97,7 @@ int main(int argc, char **argv)
     cv::namedWindow("swaos", cv::WINDOW_AUTOSIZE);
 
     pthread_barrier_init(&barrier, NULL, NUM_THREADS);
+    sem_init(&print_sem, 0, 1);
 
     while (!is_processing_done)
     {
@@ -114,6 +120,7 @@ int main(int argc, char **argv)
         {
             break;
         }
+        //exit(1);
     }
 
     capturer.release();
@@ -136,8 +143,8 @@ void parse_args(int argc, char **argv, struct FnameInfo &fname_info)
 
 void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sobel_frame)
 {
-    size_t small_row_quantum = input_frame.cols / NUM_THREADS;
-    size_t big_row_quantum = input_frame.cols - (small_row_quantum * (NUM_THREADS - 1));
+    size_t small_row_quantum = input_frame.rows / NUM_THREADS;
+    size_t big_row_quantum = input_frame.rows - (small_row_quantum * (NUM_THREADS - 1));
     struct ThreadArgument *arg;
 
     /* Create threads */
@@ -145,7 +152,8 @@ void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sob
     {
         arg = &args[i];
         arg->bottom_row_index = i * small_row_quantum;
-        arg->rows_to_read = i == NUM_THREADS-1 ? big_row_quantum : small_row_quantum;
+        arg->rows_to_read = (i == NUM_THREADS-1) ? big_row_quantum : small_row_quantum;
+        arg->last = (i == NUM_THREADS-1) ? true : false; 
         arg->input_frame_ptr = &input_frame;
         arg->grayscale_frame_ptr = &grayscale_frame;
         arg->sobel_frame_ptr = &sobel_frame;
@@ -159,17 +167,29 @@ void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sob
     }
 
     //get_grayscale(input_frame, grayscale_frame);
-    //get_sobel(grayscale_frame, sobel_frame);
+    //get_sobel(grayscale_frame, sobel_frame, 0, sobel_frame.rows);
 }
 
 void *generate_subset(void *arg)
 {
+    struct ThreadArgument *thread_arg = (struct ThreadArgument *)arg;
+    size_t sobel_quantum;
+
     /* Get grayscale */
+    get_grayscale(*thread_arg->input_frame_ptr, *thread_arg->grayscale_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read);
+
+    /**/
+    //sem_wait(&print_sem);
+    //printf("BOTTOM ROW: %i, QUANTUM: %i, INPUT SIZE: %i\n", thread_arg->bottom_row_index, thread_arg->rows_to_read, thread_arg->input_frame_ptr->rows);
+    //sem_post(&print_sem);
 
     /* Barrier */
     pthread_barrier_wait(&barrier);
 
     /* Get sobel */
+    /* Check if last index */
+    sobel_quantum = thread_arg->last ? thread_arg->rows_to_read - 2 : thread_arg->rows_to_read;
+    get_sobel(*thread_arg->grayscale_frame_ptr, *thread_arg->sobel_frame_ptr, thread_arg->bottom_row_index, sobel_quantum);
 
     return NULL;
 }
@@ -178,19 +198,20 @@ void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row
 {
     cv::Vec3b input_pixel;
 
-    for (int y = 0; y < input_frame.rows; y++)
+    for (int y = lower_row; y < lower_row + (int)quantum; y++)
     {
         for (int x = 0; x < input_frame.cols; x++)
         {
             input_pixel = input_frame.at<cv::Vec3b>(y,x);
             grayscale_frame.at<uint8_t>(y, x) = get_pixel_grayscale(input_pixel[2], input_pixel[1], input_pixel[0]);
+            //printf("Greyscale val: %i\n", grayscale_frame.at<uint8_t>(y, x));
         }
     }
 }
 
 void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, size_t quantum)
 {
-    for (int y = 0; y < sobel_frame.rows; y++)
+    for (int y = lower_row; y < lower_row + (int)quantum; y++)
     {
         for (int x = 0; x < sobel_frame.cols; x++)
         {
