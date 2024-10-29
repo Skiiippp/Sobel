@@ -7,8 +7,12 @@
 #include <string>
 #include <cstdint>
 
+#include <pthread.h>
+
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
+
+#define NUM_THREADS 4
 
 const int x_kern[3][3] = 
 {
@@ -29,20 +33,40 @@ struct FnameInfo
     std::string in_vid_filename;
 };
 
+struct ThreadArgument
+{
+    cv::Mat *input_frame_ptr;
+    cv::Mat *grayscale_frame_ptr;
+    cv::Mat *sobel_frame_ptr;
+    int bottom_row_index;
+    size_t rows_to_read;
+};
+
+/* Barriers  */
+pthread_barrier_t barrier;
+
+/* Threads */
+static pthread_t threads[NUM_THREADS];
+static ThreadArgument args[NUM_THREADS];
+
 void parse_args(int argc, char **argv, struct FnameInfo &fname_info);
 
-void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame);
+void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sobel_frame);
 
-void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame);
+void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row, size_t quantum);
+
+void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, size_t quantum);
 
 uint8_t get_pixel_grayscale(uint8_t red, uint8_t green, uint8_t blue);
 
 /* x and y with respect to sobel, not grayscale */
 uint8_t get_pixel_sobel(int x, int y, cv::Mat &grayscale_frame);
 
+void *generate_subset(void *arg);
+
 int main(int argc, char **argv)
 {
-    cv::Mat input_frame, graysacle_frame, sobel_frame;
+    cv::Mat input_frame, grayscale_frame, sobel_frame;
     cv::VideoCapture capturer;
     int input_height, input_width;
     cv::Size input_size, output_size;
@@ -62,10 +86,12 @@ int main(int argc, char **argv)
     input_size = cv::Size(input_width, input_height);
     output_size = cv::Size(input_width-2, input_height-2);
     
-    graysacle_frame = cv::Mat::zeros(input_size, CV_8UC1);
+    grayscale_frame = cv::Mat::zeros(input_size, CV_8UC1);
     sobel_frame = cv::Mat::zeros(output_size, CV_8UC1);
 
     cv::namedWindow("swaos", cv::WINDOW_AUTOSIZE);
+
+    pthread_barrier_init(&barrier, NULL, NUM_THREADS);
 
     while (!is_processing_done)
     {
@@ -78,8 +104,8 @@ int main(int argc, char **argv)
             continue;
         }
 
-        get_grayscale(input_frame, graysacle_frame);
-        get_sobel(graysacle_frame, sobel_frame);
+        /* "Naive" threaded implementation - create and destroy threads on each run */
+        generate_image(input_frame, grayscale_frame, sobel_frame);
     
         cv::imshow("swaos", sobel_frame);
 
@@ -92,6 +118,7 @@ int main(int argc, char **argv)
 
     capturer.release();
     cv::destroyAllWindows();
+    pthread_barrier_destroy(&barrier);
 
     return 0;
 }
@@ -107,7 +134,47 @@ void parse_args(int argc, char **argv, struct FnameInfo &fname_info)
     fname_info.in_vid_filename = argv[1];
 }
 
-void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame)
+void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sobel_frame)
+{
+    size_t small_row_quantum = input_frame.cols / NUM_THREADS;
+    size_t big_row_quantum = input_frame.cols - (small_row_quantum * (NUM_THREADS - 1));
+    struct ThreadArgument *arg;
+
+    /* Create threads */
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        arg = &args[i];
+        arg->bottom_row_index = i * small_row_quantum;
+        arg->rows_to_read = i == NUM_THREADS-1 ? big_row_quantum : small_row_quantum;
+        arg->input_frame_ptr = &input_frame;
+        arg->grayscale_frame_ptr = &grayscale_frame;
+        arg->sobel_frame_ptr = &sobel_frame;
+
+        pthread_create(&threads[i], NULL, generate_subset, (void *)arg);
+    }
+
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        pthread_join(threads[i], NULL);
+    }
+
+    //get_grayscale(input_frame, grayscale_frame);
+    //get_sobel(grayscale_frame, sobel_frame);
+}
+
+void *generate_subset(void *arg)
+{
+    /* Get grayscale */
+
+    /* Barrier */
+    pthread_barrier_wait(&barrier);
+
+    /* Get sobel */
+
+    return NULL;
+}
+
+void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row, size_t quantum)
 {
     cv::Vec3b input_pixel;
 
@@ -121,7 +188,7 @@ void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame)
     }
 }
 
-void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame)
+void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, size_t quantum)
 {
     for (int y = 0; y < sobel_frame.rows; y++)
     {
