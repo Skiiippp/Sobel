@@ -1,5 +1,3 @@
-*.mp4
-*.webm
 *.zip
 build
 .vscode
