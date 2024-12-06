@@ -1,14 +1,15 @@
 /**
- * By James Gruber and Daniel Brathwaite, 10/19/2024
+ * By James Gruber and Daniel Brathwaite, 11/22/2024
  */
 
 
 #include <cstdio>
 #include <string>
 #include <cstdint>
-
 #include <pthread.h>
 #include <semaphore.h>
+
+#include <arm_neon.h>
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
@@ -196,15 +197,14 @@ void *generate_subset(void *arg)
 
 void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row, size_t quantum)
 {
-    cv::Vec3b input_pixel;
-
     for (int y = lower_row; y < lower_row + (int)quantum; y++)
     {
-        for (int x = 0; x < input_frame.cols; x++)
+        for (int x = 0; x < input_frame.cols; x+=4)
         {
-            input_pixel = input_frame.at<cv::Vec3b>(y,x);
-            grayscale_frame.at<uint8_t>(y, x) = get_pixel_grayscale(input_pixel[2], input_pixel[1], input_pixel[0]);
-            //printf("Greyscale val: %i\n", grayscale_frame.at<uint8_t>(y, x));
+            uint8x8x3_t pixel = vld3_u8(&input_frame.at<cv::Vec3b>(y, x)[0]);
+            uint16x8_t gray = vaddq_u16(vmlaq_n_u16(vmulq_n_u16(vmovl_u8(pixel.val[0]),54),vmovl_u8(pixel.val[1]),183),vmovl_u8(pixel.val[2]));            
+            gray = vrshrq_n_u16(gray, 8);
+            vst1_u8(&grayscale_frame.at<uint8_t>(y ,x), vmovn_u16(gray));
         }
     }
 }
@@ -213,9 +213,20 @@ void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, si
 {
     for (int y = lower_row; y < lower_row + (int)quantum; y++)
     {
-        for (int x = 0; x < sobel_frame.cols; x++)
+        for (int x = 1; x < grayscale_frame.cols-1; x+=8)
         {
-            sobel_frame.at<uint8_t>(y, x) = get_pixel_sobel(x, y, grayscale_frame);
+            int16x8_t gx = vdupq_n_s16(0);
+            int16x8_t gy = vdupq_n_s16(0);
+
+            for(int z=-1;z<=1;z++){
+                int16x8_t row = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(&grayscale_frame.at<uint8_t>(y+z,x-1))));
+                gx = vmlaq_n_s16(gx, row, (z==0) ? 0 : ((z==-1) ? -1 : 1));
+                gy = vmlaq_n_s16(gy, row, (z==0) ? 0 : ((z==-1) ? 1 : -1));
+            }
+
+            int16x8_t mag = vaddq_s16(vabsq_s16(gx), vabsq_s16(gy));
+
+            vst1_u8(&sobel_frame.at<uint8_t>(y-1, x-1), vqmovun_s16(mag));
         }
     }
 }
