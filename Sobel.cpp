@@ -1,11 +1,12 @@
 /**
- * By James Gruber and Daniel Brathwaite, 10/19/2024
+ * By James Gruber and Daniel Brathwaite, 12/11/2024
  */
 
 
 #include <cstdio>
 #include <string>
 #include <cstdint>
+#include <chrono>
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -79,6 +80,8 @@ int main(int argc, char **argv)
     cv::Size input_size, output_size;
     bool is_processing_done = false;
     struct FnameInfo fname_info;
+    size_t frame_count = 0;
+    std::chrono::microseconds avg_frame_durr = std::chrono::microseconds(0), cur_frame_durr;
 
     parse_args(argc, argv, fname_info);
 
@@ -101,8 +104,13 @@ int main(int argc, char **argv)
     pthread_barrier_init(&barrier, NULL, NUM_THREADS);
     sem_init(&print_sem, 0, 1);
 
+
     while (!is_processing_done)
     {
+        auto start = std::chrono::steady_clock::now();
+        
+        frame_count++;
+        
         /* Input frames are CV_8UC3*/
         capturer >> input_frame;   
 
@@ -122,11 +130,20 @@ int main(int argc, char **argv)
         {
             break;
         }
+        
+        auto end = std::chrono::steady_clock::now();
+        
+        cur_frame_durr = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+        avg_frame_durr = (((frame_count-1)*avg_frame_durr) + cur_frame_durr)/frame_count;
     }
 
     capturer.release();
     cv::destroyAllWindows();
     pthread_barrier_destroy(&barrier);
+    
+    auto sec_durr = std::chrono::duration<double>(avg_frame_durr);
+    float avg_fps = 1/(sec_durr.count());
+    printf("Average FPS: %f\n", avg_fps);
 
     return 0;
 }

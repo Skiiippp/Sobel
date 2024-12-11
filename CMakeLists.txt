@@ -3,7 +3,7 @@ set(CMAKE_CXX_STANDARD 11)
 project(Sobel)
 
 
-set(CMAKE_CXX_FLAGS "-Wall -Wextra -g -O0")
+set(CMAKE_CXX_FLAGS "-Wall -Wextra -g -O2 -fselective-scheduling -fsel-sched-pipelining -funroll-loops -floop-interchange -ftree-loop-distribution -funswitch-loops -floop-block -floop-parallelize-all -ftree-vectorize -ftree-loop-vectorize")
 
 find_package(OpenCV REQUIRED)
 
