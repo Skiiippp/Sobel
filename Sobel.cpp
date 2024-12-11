@@ -50,12 +50,11 @@ struct ThreadArgument
 /* Barriers  */
 pthread_barrier_t barrier;
 
-/* Printing semaphore */
-sem_t print_sem;
-
 /* Threads */
 static pthread_t threads[NUM_THREADS];
 static ThreadArgument args[NUM_THREADS];
+
+bool sleep_threads = true, kill_threads = false;
 
 void parse_args(int argc, char **argv, struct FnameInfo &fname_info);
 
@@ -102,8 +101,23 @@ int main(int argc, char **argv)
     cv::namedWindow("swaos", cv::WINDOW_AUTOSIZE);
 
     pthread_barrier_init(&barrier, NULL, NUM_THREADS);
-    sem_init(&print_sem, 0, 1);
 
+    /* Create threads */
+    size_t small_row_quantum = input_frame.rows / NUM_THREADS;
+    size_t big_row_quantum = input_frame.rows - (small_row_quantum * (NUM_THREADS - 1));
+    struct ThreadArgument *arg;
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        arg = &args[i];
+        arg->bottom_row_index = i * small_row_quantum;
+        arg->rows_to_read = (i == NUM_THREADS-1) ? big_row_quantum : small_row_quantum;
+        arg->last = (i == NUM_THREADS-1) ? true : false; 
+        arg->input_frame_ptr = &input_frame;
+        arg->grayscale_frame_ptr = &grayscale_frame;
+        arg->sobel_frame_ptr = &sobel_frame;
+
+        pthread_create(&threads[i], NULL, generate_subset, (void *)arg);
+    }
 
     while (!is_processing_done)
     {
@@ -119,9 +133,9 @@ int main(int argc, char **argv)
             is_processing_done = true;
             continue;
         }
-
-        /* "Naive" threaded implementation - create and destroy threads on each run */
-        generate_image(input_frame, grayscale_frame, sobel_frame);
+        
+        sleep_threads = false;
+        
     
         cv::imshow("swaos", sobel_frame);
 
@@ -139,6 +153,11 @@ int main(int argc, char **argv)
 
     capturer.release();
     cv::destroyAllWindows();
+    kill_threads = true;
+    for (int i = 0; i < NUM_THREADS; i++)
+    {
+        pthread_join(threads[i], NULL);
+    }
     pthread_barrier_destroy(&barrier);
     
     auto sec_durr = std::chrono::duration<double>(avg_frame_durr);
@@ -188,20 +207,30 @@ void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sob
 void *generate_subset(void *arg)
 {
     struct ThreadArgument *thread_arg = (struct ThreadArgument *)arg;
-    size_t sobel_quantum;
+    size_t sobel_quantum = thread_arg->last ? thread_arg->rows_to_read - 2 : thread_arg->rows_to_read;
 
-    /* Get grayscale */
-    get_grayscale(*thread_arg->input_frame_ptr, *thread_arg->grayscale_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read);
+    while(1)
+    {
+        while(sleep_threads && !kill_threads);
+        if (kill_threads)
+        {
+            break;
+        }
+        
+        /* Get grayscale */
+        get_grayscale(*thread_arg->input_frame_ptr, *thread_arg->grayscale_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read);
 
-    /* Barrier */
-    pthread_barrier_wait(&barrier);
+        /* Barrier */
+        pthread_barrier_wait(&barrier);
 
-    /* Get sobel */
-    /* Check if last index */
-    sobel_quantum = thread_arg->last ? thread_arg->rows_to_read - 2 : thread_arg->rows_to_read;
-    get_sobel(*thread_arg->grayscale_frame_ptr, *thread_arg->sobel_frame_ptr, thread_arg->bottom_row_index, sobel_quantum);
+        /* Get sobel */
+        get_sobel(*thread_arg->grayscale_frame_ptr, *thread_arg->sobel_frame_ptr, thread_arg->bottom_row_index, sobel_quantum);
+        
+        pthread_barrier_wait(&barrier);
+        sleep_threads = true;
+    }
 
-    return NULL;
+    pthread_exit(NULL);
 }
 
 void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row, size_t quantum)
