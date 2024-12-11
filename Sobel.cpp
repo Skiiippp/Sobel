@@ -1,12 +1,11 @@
-/**
- * By James Gruber and Daniel Brathwaite, 12/11/2024
- */
-
-
 #include <cstdio>
 #include <string>
 #include <cstdint>
 #include <chrono>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
 
 #include <pthread.h>
 #include <semaphore.h>
@@ -47,15 +46,12 @@ struct ThreadArgument
     bool last;
 };
 
-/* Barriers  */
-pthread_barrier_t barrier;
-
-/* Printing semaphore */
-sem_t print_sem;
-
-/* Threads */
-static pthread_t threads[NUM_THREADS];
-static ThreadArgument args[NUM_THREADS];
+/* Thread Pool Management */
+std::atomic<bool> stop_threads(false);
+std::vector<std::thread> thread_pool;
+std::mutex task_mutex;
+std::condition_variable task_cv;
+std::queue<ThreadArgument> task_queue;
 
 void parse_args(int argc, char **argv, struct FnameInfo &fname_info);
 
@@ -70,7 +66,7 @@ uint8_t get_pixel_grayscale(uint8_t red, uint8_t green, uint8_t blue);
 /* x and y with respect to sobel, not grayscale */
 uint8_t get_pixel_sobel(int x, int y, cv::Mat &grayscale_frame);
 
-void *generate_subset(void *arg);
+void worker_thread();  // Thread function for the thread pool
 
 int main(int argc, char **argv)
 {
@@ -101,9 +97,10 @@ int main(int argc, char **argv)
 
     cv::namedWindow("swaos", cv::WINDOW_AUTOSIZE);
 
-    pthread_barrier_init(&barrier, NULL, NUM_THREADS);
-    sem_init(&print_sem, 0, 1);
-
+    // Initialize thread pool
+    for (int i = 0; i < NUM_THREADS; ++i) {
+        thread_pool.push_back(std::thread(worker_thread));
+    }
 
     while (!is_processing_done)
     {
@@ -120,7 +117,7 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* "Naive" threaded implementation - create and destroy threads on each run */
+        /* Assign work to threads */
         generate_image(input_frame, grayscale_frame, sobel_frame);
     
         cv::imshow("swaos", sobel_frame);
@@ -139,7 +136,13 @@ int main(int argc, char **argv)
 
     capturer.release();
     cv::destroyAllWindows();
-    pthread_barrier_destroy(&barrier);
+
+    // Stop threads and join them
+    stop_threads.store(true);
+    task_cv.notify_all();  // Wake up all threads to finish their work
+    for (auto &t : thread_pool) {
+        t.join();
+    }
     
     auto sec_durr = std::chrono::duration<double>(avg_frame_durr);
     float avg_fps = 1/(sec_durr.count());
@@ -165,10 +168,10 @@ void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sob
     size_t big_row_quantum = input_frame.rows - (small_row_quantum * (NUM_THREADS - 1));
     struct ThreadArgument *arg;
 
-    /* Create threads */
+    /* Create tasks */
     for (int i = 0; i < NUM_THREADS; i++)
     {
-        arg = &args[i];
+        arg = new ThreadArgument();
         arg->bottom_row_index = i * small_row_quantum;
         arg->rows_to_read = (i == NUM_THREADS-1) ? big_row_quantum : small_row_quantum;
         arg->last = (i == NUM_THREADS-1) ? true : false; 
@@ -176,38 +179,51 @@ void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sob
         arg->grayscale_frame_ptr = &grayscale_frame;
         arg->sobel_frame_ptr = &sobel_frame;
 
-        pthread_create(&threads[i], NULL, generate_subset, (void *)arg);
+        {
+            std::lock_guard<std::mutex> lock(task_mutex);
+            task_queue.push(*arg);  // Add task to the queue
+        }
+        task_cv.notify_one();  // Notify a worker to process the task
     }
 
-    for (int i = 0; i < NUM_THREADS; i++)
+    // Wait for all tasks to finish
     {
-        pthread_join(threads[i], NULL);
+        std::lock_guard<std::mutex> lock(task_mutex);
+        while (!task_queue.empty()) {
+            task_cv.wait_for(task_mutex, std::chrono::milliseconds(10));  // Wait for tasks to be processed
+        }
     }
 }
 
-void *generate_subset(void *arg)
+void worker_thread()
 {
-    struct ThreadArgument *thread_arg = (struct ThreadArgument *)arg;
-    size_t sobel_quantum;
+    while (!stop_threads.load()) {
+        ThreadArgument task;
 
-    /* Get grayscale */
-    get_grayscale(*thread_arg->input_frame_ptr, *thread_arg->grayscale_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read);
+        {
+            std::unique_lock<std::mutex> lock(task_mutex);
+            task_cv.wait(lock, []{ return !task_queue.empty() || stop_threads.load(); });
+            
+            if (stop_threads.load() && task_queue.empty()) {
+                return;  // Exit thread if no more tasks and stop flag is set
+            }
 
-    /* Barrier */
-    pthread_barrier_wait(&barrier);
+            task = task_queue.front();  // Get the task from the queue
+            task_queue.pop();
+        }
 
-    /* Get sobel */
-    /* Check if last index */
-    sobel_quantum = thread_arg->last ? thread_arg->rows_to_read - 2 : thread_arg->rows_to_read;
-    get_sobel(*thread_arg->grayscale_frame_ptr, *thread_arg->sobel_frame_ptr, thread_arg->bottom_row_index, sobel_quantum);
+        // Process task
+        get_grayscale(*task.input_frame_ptr, *task.grayscale_frame_ptr, task.bottom_row_index, task.rows_to_read);
 
-    return NULL;
+        /* Get Sobel */
+        get_sobel(*task.grayscale_frame_ptr, *task.sobel_frame_ptr, task.bottom_row_index, task.rows_to_read);
+    }
 }
 
 void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row, size_t quantum)
 {
     for (int y = lower_row; y < lower_row + (int)quantum; y++) {
-	    for (int x = 0; x < input_frame.cols; x += 4) {
+        for (int x = 0; x < input_frame.cols; x += 4) {
             // Load pixel data
             uint8x8x3_t pixel = vld3_u8(&input_frame.at<cv::Vec3b>(y, x)[0]);
 
@@ -230,19 +246,16 @@ void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row
             uint8x8_t finalGrayscale = vmovn_u16(grayscale);
 
             vst1_u8(&grayscale_frame.at<uint8_t>(y, x), finalGrayscale);
-	    }
+        }
     }
 }
 
 void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, size_t quantum)
 {
-    for (int y = lower_row; y < lower_row + (int)quantum; y++)
-    {
-        for (int x = 1; x < sobel_frame.cols - 1; x += 8)
-        {
+    for (int y = lower_row; y < lower_row + (int)quantum; y++) {
+        for (int x = 1; x < sobel_frame.cols - 1; x += 8) {
             // Check that pixel is valid
-            if (y - 1 >= 0 && y + 1 < grayscale_frame.rows)
-            {
+            if (y - 1 >= 0 && y + 1 < grayscale_frame.rows) {
                 int16x8_t gx = vdupq_n_s16(0);
                 int16x8_t gy = vdupq_n_s16(0);
 
@@ -252,7 +265,7 @@ void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, si
                     int8_t weightY = -j;
 
                     uint8x8_t row = vld1_u8(&grayscale_frame.at<uint8_t>(y + j, x - 1));
-                    
+
                     // Expand 8bit vals to 16bit to prevent overflow
                     uint16x8_t urow16 = vmovl_u8(row);
                     int16x8_t row16 = vreinterpretq_s16_u16(urow16);
