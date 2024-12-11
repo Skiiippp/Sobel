@@ -10,6 +10,8 @@
 #include <pthread.h>
 #include <semaphore.h>
 
+#include <arm_neon.h>
+
 #include <opencv2/opencv.hpp>
 #include <opencv2/videoio.hpp>
 
@@ -120,7 +122,6 @@ int main(int argc, char **argv)
         {
             break;
         }
-        //exit(1);
     }
 
     capturer.release();
@@ -165,9 +166,6 @@ void generate_image(cv::Mat &input_frame, cv::Mat &grayscale_frame, cv::Mat &sob
     {
         pthread_join(threads[i], NULL);
     }
-
-    //get_grayscale(input_frame, grayscale_frame);
-    //get_sobel(grayscale_frame, sobel_frame, 0, sobel_frame.rows);
 }
 
 void *generate_subset(void *arg)
@@ -177,11 +175,6 @@ void *generate_subset(void *arg)
 
     /* Get grayscale */
     get_grayscale(*thread_arg->input_frame_ptr, *thread_arg->grayscale_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read);
-
-    /**/
-    //sem_wait(&print_sem);
-    //printf("BOTTOM ROW: %i, QUANTUM: %i, INPUT SIZE: %i\n", thread_arg->bottom_row_index, thread_arg->rows_to_read, thread_arg->input_frame_ptr->rows);
-    //sem_post(&print_sem);
 
     /* Barrier */
     pthread_barrier_wait(&barrier);
@@ -196,16 +189,31 @@ void *generate_subset(void *arg)
 
 void get_grayscale(cv::Mat &input_frame, cv::Mat &grayscale_frame, int lower_row, size_t quantum)
 {
-    cv::Vec3b input_pixel;
+    for (int y = lower_row; y < lower_row + (int)quantum; y++) {
+	    for (int x = 0; x < input_frame.cols; x += 4) {
+            // Load pixel data
+            uint8x8x3_t pixel = vld3_u8(&input_frame.at<cv::Vec3b>(y, x)[0]);
 
-    for (int y = lower_row; y < lower_row + (int)quantum; y++)
-    {
-        for (int x = 0; x < input_frame.cols; x++)
-        {
-            input_pixel = input_frame.at<cv::Vec3b>(y,x);
-            grayscale_frame.at<uint8_t>(y, x) = get_pixel_grayscale(input_pixel[2], input_pixel[1], input_pixel[0]);
-            //printf("Greyscale val: %i\n", grayscale_frame.at<uint8_t>(y, x));
-        }
+            uint16x8_t red   = vmovl_u8(pixel.val[0]);
+            uint16x8_t green = vmovl_u8(pixel.val[1]);
+            uint16x8_t blue  = vmovl_u8(pixel.val[2]);
+
+            // Multiply channels by their respective grayscale weights
+            uint16x8_t weightedRed   = vmulq_n_u16(red, 54);
+            uint16x8_t weightedGreen = vmulq_n_u16(green, 183);
+            uint16x8_t weightedBlue  = vmulq_n_u16(blue, 19);
+
+            // Compute normalized sum of weighted channels
+            uint16x8_t sum = vaddq_u16(weightedRed, weightedGreen);
+            sum = vaddq_u16(sum, weightedBlue);
+
+            uint16x8_t grayscale = vrshrq_n_u16(sum, 8);
+
+            // Convert result back to 8-bit
+            uint8x8_t finalGrayscale = vmovn_u16(grayscale);
+
+            vst1_u8(&grayscale_frame.at<uint8_t>(y, x), finalGrayscale);
+	    }
     }
 }
 
@@ -213,51 +221,35 @@ void get_sobel(cv::Mat &grayscale_frame, cv::Mat &sobel_frame, int lower_row, si
 {
     for (int y = lower_row; y < lower_row + (int)quantum; y++)
     {
-        for (int x = 0; x < sobel_frame.cols; x++)
+        for (int x = 1; x < sobel_frame.cols - 1; x += 8)
         {
-            sobel_frame.at<uint8_t>(y, x) = get_pixel_sobel(x, y, grayscale_frame);
+            // Check that pixel is valid
+            if (y - 1 >= 0 && y + 1 < grayscale_frame.rows)
+            {
+                int16x8_t gx = vdupq_n_s16(0);
+                int16x8_t gy = vdupq_n_s16(0);
+
+                // Sobel computation loop
+                for (int j = -1; j <= 1; j++) {
+                    int8_t weightX = j;
+                    int8_t weightY = -j;
+
+                    uint8x8_t row = vld1_u8(&grayscale_frame.at<uint8_t>(y + j, x - 1));
+                    
+                    // Expand 8bit vals to 16bit to prevent overflow
+                    uint16x8_t urow16 = vmovl_u8(row);
+                    int16x8_t row16 = vreinterpretq_s16_u16(urow16);
+
+                    // Apply weights
+                    gx = vmlaq_n_s16(gx, row16, weightX);
+                    gy = vmlaq_n_s16(gy, row16, weightY);
+                }
+
+                // Compute magnitude of gradient
+                int16x8_t gradient_mag = vaddq_s16(vabsq_s16(gx), vabsq_s16(gy));
+
+                vst1_u8(&sobel_frame.at<uint8_t>(y - 1, x - 1), vqmovun_s16(gradient_mag));
+            }
         }
     }
-}
-
-uint8_t get_pixel_grayscale(uint8_t red, uint8_t green, uint8_t blue)
-{
-    uint16_t pixel_grayscale = 0.2126*red + 0.7152*green + 0.0722*blue;
-
-    if (pixel_grayscale > UINT8_MAX)
-    {
-        pixel_grayscale = UINT8_MAX;
-    }
-
-    return pixel_grayscale;
-}
-
-uint8_t get_pixel_sobel(int x, int y, cv::Mat &grayscale_frame)
-{
-    int grayscale_x = x + 1, grayscale_y = y + 1;
-    uint8_t pixel_grayscale;
-    int16_t x_grad = 0, y_grad = 0;
-    uint16_t x_mag, y_mag;
-    uint16_t out_big;
-
-    for (int j = 0; j < 3; j++)
-    {
-        for (int i = 0; i < 3; i++)
-        {
-            pixel_grayscale = grayscale_frame.at<uint8_t>(grayscale_y + j - 1, grayscale_x + i - 1);
-            x_grad += (int16_t)pixel_grayscale * x_kern[i][j];
-            y_grad += (int16_t)pixel_grayscale * y_kern[i][j];
-        }
-    }
-
-    /* Get abs value */
-    x_mag = (x_grad < 0) ? x_grad * -1 : x_grad;
-    y_mag = (y_grad < 0) ? y_grad * -1 : y_grad;
-
-    out_big = x_mag + y_mag;
-
-    /* Clamp */
-    out_big = (out_big > UINT8_MAX) ? UINT8_MAX : out_big;
-
-    return (uint8_t)out_big;
 }
