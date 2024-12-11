@@ -130,6 +130,7 @@ int main(int argc, char **argv)
         /* Input frames are CV_8UC3*/
         capturer >> input_frame;   
 
+        /* */
         if (input_frame.empty())
         {
             is_processing_done = true;
@@ -162,14 +163,14 @@ int main(int argc, char **argv)
         cur_frame_durr = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
         avg_frame_durr = (((frame_count-1)*avg_frame_durr) + cur_frame_durr)/frame_count;
     }
-
-    capturer.release();
-    cv::destroyAllWindows();
-    pthread_barrier_destroy(&barrier);
     
     auto sec_durr = std::chrono::duration<double>(avg_frame_durr);
     float avg_fps = 1/(sec_durr.count());
     printf("Average FPS: %f\n", avg_fps);
+
+    capturer.release();
+    cv::destroyAllWindows();
+    pthread_barrier_destroy(&barrier);
 
     return 0;
 }
@@ -231,11 +232,10 @@ void *generate_subset(void *arg)
         thread_arg->input_frame_ptr = &shared_input_frame;
         pthread_mutex_unlock(&frame_mutex);
 
-        // Perform work
+        /* Do work*/
         get_grayscale(*thread_arg->input_frame_ptr, *thread_arg->grayscale_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read);
         pthread_barrier_wait(&barrier);
         get_sobel(*thread_arg->grayscale_frame_ptr, *thread_arg->sobel_frame_ptr, thread_arg->bottom_row_index, thread_arg->rows_to_read - (thread_arg->last ? 2 : 0));
-
         pthread_barrier_wait(&barrier);
     }
     return NULL;
